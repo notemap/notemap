@@ -1,0 +1,38 @@
+name: Bug report
+description: Something isn't working as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a notemap
+        2. Press …
+        3. …
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - macOS app
+        - Browser
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: macOS app version (Notemap › About Notemap), or your browser and its version.
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, a screen recording, or an exported notemap help a lot.

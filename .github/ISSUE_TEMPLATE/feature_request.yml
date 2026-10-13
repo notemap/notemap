@@ -1,0 +1,16 @@
+name: Idea
+description: Something Notemap could do, or do better.
+labels: [idea]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What would you like Notemap to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What are you trying to get done? How do you do it today?

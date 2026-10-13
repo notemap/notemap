@@ -1,0 +1,121 @@
+name: Release
+
+# Builds Notemap for macOS from the private source on a v* tag, signs and
+# notarises it, and publishes it here with the updater's latest.json, so the
+# app and its updates have public URLs while the source stays private.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Notemap (macOS universal)
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: The ref has to be a version tag
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "Not a v* tag: $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
+      - name: The window needs the API and website it talks to
+        env:
+          API_URL: ${{ vars.DESKTOP_API_URL }}
+          WEB_URL: ${{ vars.DESKTOP_WEB_URL }}
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$WEB_URL" ]; then
+            echo "Set the DESKTOP_API_URL and DESKTOP_WEB_URL repository variables." >&2
+            exit 1
+          fi
+
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: nilbuild/notemap
+          ref: main
+          ssh-key: ${{ secrets.SOURCE_SSH_KEY }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: universal
+
+      - run: bun install --frozen-lockfile
+
+      - name: Stamp version from tag
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          python3 -c "import json,sys; p='apps/desktop/src-tauri/tauri.conf.json'; d=json.load(open(p)); d['version']=sys.argv[1]; json.dump(d,open(p,'w'),indent=2)" "$VER"
+          echo "Building Notemap $VER"
+
+      - name: Release notes from the tag
+        id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEFAULT='Download the universal .dmg (runs on Apple Silicon and Intel). The app updates itself after install.'
+          BODY=""
+          TYPE=$(gh api "repos/${{ github.repository }}/git/refs/tags/${{ github.ref_name }}" -q .object.type 2>/dev/null || true)
+          OBJ=$(gh api "repos/${{ github.repository }}/git/refs/tags/${{ github.ref_name }}" -q .object.sha 2>/dev/null || true)
+          if [ "$TYPE" = "tag" ] && [ -n "$OBJ" ]; then
+            BODY=$(gh api "repos/${{ github.repository }}/git/tags/$OBJ" -q .message 2>/dev/null || true)
+          fi
+          if [ -z "$BODY" ]; then
+            BODY="$DEFAULT"
+          fi
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            echo "$BODY"
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # The icon ships compiled (icons/Assets.car); the bundler only reaches
+      # for actool if it's missing, and then it should be the newest Xcode's.
+      - name: Point at the newest Xcode
+        run: |
+          newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$newest" ]; then
+            sudo xcode-select -s "$newest"
+          fi
+          xcodebuild -version
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          NOTEMAP_API_URL: ${{ vars.DESKTOP_API_URL }}
+          NOTEMAP_WEB_URL: ${{ vars.DESKTOP_WEB_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: bun run tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: Notemap __VERSION__
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
+          prerelease: false
+          args: --target universal-apple-darwin --verbose
