@@ -1,0 +1,92 @@
+name: Check build
+
+# The release build, signed and notarised, without publishing anything: for
+# trying the pipeline or a branch. The .dmg is kept as a run artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or commit of nilbuild/notemap
+        default: main
+
+jobs:
+  desktop:
+    name: Notemap (macOS universal, not published)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: The window needs the API and website it talks to
+        env:
+          API_URL: ${{ vars.DESKTOP_API_URL }}
+          WEB_URL: ${{ vars.DESKTOP_WEB_URL }}
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$WEB_URL" ]; then
+            echo "Set the DESKTOP_API_URL and DESKTOP_WEB_URL repository variables." >&2
+            exit 1
+          fi
+
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: nilbuild/notemap
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_SSH_KEY }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: universal
+
+      - run: bun install --frozen-lockfile
+
+      - name: Stamp a check version
+        run: |
+          VER="0.0.${{ github.run_number }}"
+          python3 -c "import json,sys; p='apps/desktop/src-tauri/tauri.conf.json'; d=json.load(open(p)); d['version']=sys.argv[1]; json.dump(d,open(p,'w'),indent=2)" "$VER"
+          echo "Building Notemap $VER"
+
+      # The icon ships compiled (icons/Assets.car); the bundler only reaches
+      # for actool if it's missing, and then it should be the newest Xcode's.
+      - name: Point at the newest Xcode
+        run: |
+          newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$newest" ]; then
+            sudo xcode-select -s "$newest"
+          fi
+          xcodebuild -version
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          NOTEMAP_API_URL: ${{ vars.DESKTOP_API_URL }}
+          NOTEMAP_WEB_URL: ${{ vars.DESKTOP_WEB_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: bun run tauri
+          args: --target universal-apple-darwin --verbose
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notemap-check-${{ github.run_number }}
+          path: |
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.sig
+          retention-days: 7
