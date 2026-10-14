@@ -1,0 +1,115 @@
+name: Dev build
+
+# Builds "Notemap Dev" from a branch of the private source: an amber-icon copy
+# with its own bundle id and link scheme (notemap-dev://), so it installs next
+# to the release. Signed and notarised like a release, but it never updates
+# itself. It replaces the rolling `dev` pre-release; the updater and
+# scripts/release.sh read releases/latest, which skips pre-releases.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or commit of nilbuild/notemap to build
+        default: main
+        required: true
+
+concurrency:
+  group: dev-build
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Notemap (macOS universal, dev)
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      NOTEMAP_CHANNEL: dev
+    steps:
+      - name: The window needs the API and website it talks to
+        env:
+          API_URL: ${{ vars.DESKTOP_API_URL }}
+          WEB_URL: ${{ vars.DESKTOP_WEB_URL }}
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$WEB_URL" ]; then
+            echo "Set the DESKTOP_API_URL and DESKTOP_WEB_URL repository variables." >&2
+            exit 1
+          fi
+
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: nilbuild/notemap
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_SSH_KEY }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: universal-dev
+
+      - run: bun install --frozen-lockfile
+
+      - name: Stamp a dev version from the last release
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LAST=$(gh api "repos/${{ github.repository }}/releases/latest" -q .tag_name 2>/dev/null || true)
+          if [ -z "$LAST" ]; then
+            LAST=v$(python3 -c "import json; print(json.load(open('apps/desktop/src-tauri/tauri.conf.json'))['version'])")
+          fi
+          VER="${LAST#v}-dev.${{ github.run_number }}"
+          python3 -c "import json,sys; p='apps/desktop/src-tauri/tauri.conf.json'; d=json.load(open(p)); d['version']=sys.argv[1]; json.dump(d,open(p,'w'),indent=2)" "$VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Building Notemap Dev $VER"
+
+      - name: Remove the previous dev release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete dev --repo "${{ github.repository }}" --cleanup-tag --yes || true
+
+      # See release.yml: the icon ships compiled (icons/dev/Assets.car).
+      - name: Point at the newest Xcode
+        run: |
+          newest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$newest" ]; then
+            sudo xcode-select -s "$newest"
+          fi
+          xcodebuild -version
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          NOTEMAP_API_URL: ${{ vars.DESKTOP_API_URL }}
+          NOTEMAP_WEB_URL: ${{ vars.DESKTOP_WEB_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: bun run tauri
+          tagName: dev
+          releaseCommitish: ${{ github.sha }}
+          releaseName: Notemap Dev ${{ steps.version.outputs.version }}
+          releaseBody: |
+            Test build of nilbuild/notemap at ${{ steps.version.outputs.short }} (${{ inputs.ref }}). Not a release.
+
+            Installs as **Notemap Dev** (amber icon) next to Notemap. It does not update itself; run the Dev build workflow again for a newer one.
+          releaseDraft: false
+          prerelease: true
+          args: --target universal-apple-darwin --config src-tauri/tauri.dev.conf.json --verbose
