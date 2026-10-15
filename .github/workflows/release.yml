@@ -119,3 +119,15 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: --target universal-apple-darwin --verbose
+
+      # notemap.com reads the releases when it builds (its changelog and the
+      # Download for Mac link), so build it again now that this one is out.
+      - name: Rebuild notemap.com
+        env:
+          HOOK: ${{ secrets.PAGES_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "No PAGES_DEPLOY_HOOK secret; notemap.com picks this release up on its next build."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
